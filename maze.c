@@ -15,13 +15,13 @@
 
 #define FOV (M_PI / 3.0)
 
-#define NUM_ROOMS 25
-#define MIN_ROOM_SIZE 9
-#define MAX_ROOM_SIZE 17
+#define NUM_ROOMS 44
+#define MIN_ROOM_SIZE 3
+#define MAX_ROOM_SIZE 22
 
 #define MINIMAP_SIZE 300
-#define MINIMAP_MIN_ZOOM 6
-#define MINIMAP_MAX_ZOOM 30
+#define MINIMAP_MIN_ZOOM 1
+#define MINIMAP_MAX_ZOOM 300
 
 typedef struct {
     int x, y, w, h;
@@ -29,6 +29,7 @@ typedef struct {
 
 typedef struct {
     int **grid;
+    int **visited;  // 1 if revealed by line-of-sight, 0 if fog of war
     int w, h;
 } Maze;
 
@@ -53,10 +54,13 @@ void init_maze_with_rooms(Maze *maze, Room *rooms, int *num_rooms) {
     maze->w = MAP_W;
     maze->h = MAP_H;
     maze->grid = malloc(maze->h * sizeof(int*));
+    maze->visited = malloc(maze->h * sizeof(int*));
     for (int y = 0; y < maze->h; y++) {
         maze->grid[y] = malloc(maze->w * sizeof(int));
+        maze->visited[y] = malloc(maze->w * sizeof(int));
         for (int x = 0; x < maze->w; x++) {
             maze->grid[y][x] = WALL;
+            maze->visited[y][x] = 0;  // Initially hidden
         }
     }
 
@@ -93,8 +97,12 @@ void init_maze_with_rooms(Maze *maze, Room *rooms, int *num_rooms) {
 }
 
 void free_maze(Maze *maze) {
-    for (int y = 0; y < maze->h; y++) free(maze->grid[y]);
+    for (int y = 0; y < maze->h; y++) {
+        free(maze->grid[y]);
+        free(maze->visited[y]);
+    }
     free(maze->grid);
+    free(maze->visited);
 }
 
 void generate_maze(Maze *maze, int cx, int cy) {
@@ -138,12 +146,13 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
     int end_x_view = center_cell_x + half_view;
     int end_y_view = center_cell_y + half_view;
 
+    // Draw only revealed walls (line-of-sight only)
     SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
     for (int y = start_y; y < end_y_view; y++) {
         for (int x = start_x; x < end_x_view; x++) {
             if (x < 0 || x >= maze->w || y < 0 || y >= maze->h)
                 continue;
-            if (maze->grid[y][x] == WALL) {
+            if (maze->visited[y][x] && maze->grid[y][x] == WALL) {
                 SDL_Rect cell = {
                     map_x + (int)((x - start_x) * cell_size),
                     map_y + (int)((y - start_y) * cell_size),
@@ -175,6 +184,52 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
 }
 
 void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_map) {
+    // Reveal walls hit by rays (line-of-sight only - no proximity reveal)
+    for (int x = 0; x < SCREEN_W; x++) {
+        double cameraX = 2.0 * x / SCREEN_W - 1.0;
+        double rayDirX = player->dir_x + player->plane_x * cameraX;
+        double rayDirY = player->dir_y + player->plane_y * cameraX;
+
+        int mapX = (int)player->x;
+        int mapY = (int)player->y;
+
+        double deltaDistX = fabs(1.0 / rayDirX);
+        double deltaDistY = fabs(1.0 / rayDirY);
+
+        int stepX, stepY;
+        double sideDistX, sideDistY;
+
+        if (rayDirX < 0) { stepX = -1; sideDistX = (player->x - mapX) * deltaDistX; }
+        else             { stepX =  1; sideDistX = (mapX + 1.0 - player->x) * deltaDistX; }
+        if (rayDirY < 0) { stepY = -1; sideDistY = (player->y - mapY) * deltaDistY; }
+        else             { stepY =  1; sideDistY = (mapY + 1.0 - player->y) * deltaDistY; }
+
+        int hit = 0;
+        int final_mapX = mapX, final_mapY = mapY;
+        while (!hit) {
+            if (sideDistX < sideDistY) {
+                sideDistX += deltaDistX;
+                mapX += stepX;
+            } else {
+                sideDistY += deltaDistY;
+                mapY += stepY;
+            }
+            if (mapX < 0 || mapX >= maze->w || mapY < 0 || mapY >= maze->h || maze->grid[mapY][mapX] == WALL) {
+                hit = 1;
+                final_mapX = mapX;
+                final_mapY = mapY;
+            }
+            // Reveal every cell the ray passes through
+            if (mapX >= 0 && mapX < maze->w && mapY >= 0 && mapY < maze->h) {
+                maze->visited[mapY][mapX] = 1;
+            }
+        }
+        // Ensure the hit wall is revealed
+        if (final_mapX >= 0 && final_mapX < maze->w && final_mapY >= 0 && final_mapY < maze->h) {
+            maze->visited[final_mapY][final_mapX] = 1;
+        }
+    }
+
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
 
@@ -186,6 +241,7 @@ void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_ma
     SDL_Rect floor = {0, SCREEN_H / 2, SCREEN_W, SCREEN_H / 2};
     SDL_RenderFillRect(ren, &floor);
 
+    // Draw walls (same as before)
     for (int x = 0; x < SCREEN_W; x++) {
         double cameraX = 2.0 * x / SCREEN_W - 1.0;
         double rayDirX = player->dir_x + player->plane_x * cameraX;
@@ -249,7 +305,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    SDL_Window *win = SDL_CreateWindow("3D Maze - Large with Zoomable Minimap",
+    SDL_Window *win = SDL_CreateWindow("3D Maze - Pure Line-of-Sight Fog of War",
         SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
 
@@ -395,6 +451,7 @@ int main(int argc, char *argv[]) {
                 player.x = new_x;
             if ((int)new_y >= 0 && (int)new_y < maze.h && maze.grid[(int)new_y][(int)player.x] == PATH)
                 player.y = new_y;
+            // NO proximity reveal here - pure line-of-sight only
         }
 
         player.dir_x = cos(player.dir);
