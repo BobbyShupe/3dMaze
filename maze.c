@@ -1,4 +1,5 @@
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -25,7 +26,7 @@
 #define MINIMAP_MIN_ZOOM 1
 #define MINIMAP_MAX_ZOOM 300
 #define NUM_MAP_PIECES 3
-#define MAP_REVEAL_RADIUS 55  // Radius of revealed patch (centered elsewhere)
+#define MAP_REVEAL_RADIUS 55
 
 typedef struct {
     int x, y, w, h;
@@ -45,6 +46,7 @@ typedef struct {
 } Player;
 
 int minimap_zoom = 12;
+int current_level = 1;
 
 void init_maze_with_rooms(Maze *maze, Room *rooms, int *num_rooms);
 void free_maze(Maze *maze);
@@ -53,6 +55,7 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size);
 void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_map);
 void regenerate_maze(Maze *maze, Room *rooms, Player *player);
 void reveal_random_distant_patch(Maze *maze, int piece_x, int piece_y);
+void draw_hud(SDL_Renderer *ren, TTF_Font *font);
 
 void init_maze_with_rooms(Maze *maze, Room *rooms, int *num_rooms) {
     maze->w = MAP_W;
@@ -130,24 +133,20 @@ void generate_maze(Maze *maze, int cx, int cy) {
     }
 }
 
-// New: Reveal a circular patch centered at a random location far from the map piece
 void reveal_random_distant_patch(Maze *maze, int piece_x, int piece_y) {
     int cx, cy;
     int attempts = 0;
     do {
-        // Pick a random center somewhere on the map
         cx = rand() % maze->w;
         cy = rand() % maze->h;
         attempts++;
     } while ((abs(cx - piece_x) < 20 && abs(cy - piece_y) < 20) && attempts < 100);
 
-    // If couldn't find distant spot, just pick any
     if (attempts >= 100) {
         cx = rand() % maze->w;
         cy = rand() % maze->h;
     }
 
-    // Reveal circular area around that distant point
     for (int dy = -MAP_REVEAL_RADIUS; dy <= MAP_REVEAL_RADIUS; dy++) {
         for (int dx = -MAP_REVEAL_RADIUS; dx <= MAP_REVEAL_RADIUS; dx++) {
             int x = cx + dx;
@@ -161,7 +160,6 @@ void reveal_random_distant_patch(Maze *maze, int piece_x, int piece_y) {
 }
 
 void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
-    // Reset fog and grid
     for (int y = 0; y < maze->h; y++) {
         for (int x = 0; x < maze->w; x++) {
             maze->visited[y][x] = 0;
@@ -169,11 +167,9 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         }
     }
 
-    // 1. Place rooms first (carving open PATH areas)
     int num_rooms = 0;
     init_maze_with_rooms(maze, rooms, &num_rooms);
 
-    // 2. Guarantee a safe starting zone if no rooms were placed
     if (num_rooms == 0) {
         for (int y = 1; y < 8; y++) {
             for (int x = 1; x < 8; x++) {
@@ -184,24 +180,20 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         rooms[0] = (Room){1, 1, 7, 7};
     }
 
-    // 3. Temporarily fill room interiors with WALL so backtracker can carve richly
     for (int i = 0; i < num_rooms; i++) {
         Room r = rooms[i];
-        // Protect a small zone around (1,1) from being filled
         for (int ry = r.y + 1; ry < r.y + r.h - 1; ry++) {
             for (int rx = r.x + 1; rx < r.x + r.w - 1; rx++) {
-                if (ry < 8 && rx < 8) continue;  // preserve starting area
+                if (ry < 8 && rx < 8) continue;
                 maze->grid[ry][rx] = WALL;
             }
         }
     }
 
-    // 4. Start maze generation from first room center (guaranteed to exist)
     int start_cx = rooms[0].x + rooms[0].w / 2;
     int start_cy = rooms[0].y + rooms[0].h / 2;
     generate_maze(maze, start_cx, start_cy);
 
-    // 5. Restore room interiors to open PATH
     for (int i = 0; i < num_rooms; i++) {
         Room r = rooms[i];
         for (int ry = r.y + 1; ry < r.y + r.h - 1; ry++) {
@@ -211,9 +203,7 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         }
     }
 
-    // 6. Connect all rooms with corridors
     if (num_rooms > 1) {
-        // Shuffle for random connections
         for (int i = num_rooms - 1; i > 0; i--) {
             int j = rand() % (i + 1);
             Room temp = rooms[i];
@@ -241,17 +231,14 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         }
     }
 
-    // 7. Run extra backtracker from every room center for rich maze feel
     for (int i = 0; i < num_rooms; i++) {
         int cx = rooms[i].x + rooms[i].w / 2;
         int cy = rooms[i].y + rooms[i].h / 2;
         generate_maze(maze, cx, cy);
     }
 
-    // 8. Ensure entrance is open
     maze->grid[1][1] = PATH;
 
-    // 9. Place 3 MAP PIECES in random PATH cells (not too close to start)
     for (int i = 0; i < NUM_MAP_PIECES; i++) {
         int attempts = 0;
         int mx, my;
@@ -268,7 +255,6 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         }
     }
 
-    // 10. Place exit on a random PATH cell, not too close to start
     int exit_x, exit_y;
     int attempts = 0;
     do {
@@ -283,7 +269,6 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
     }
     maze->grid[exit_y][exit_x] = EXIT_TILE;
 
-    // 11. FINAL SAFE START: Force open 5x5 area + corridor
     const int spawn_x = 4;
     const int spawn_y = 4;
     const int safe_size = 5;
@@ -298,15 +283,16 @@ void regenerate_maze(Maze *maze, Room *rooms, Player *player) {
         }
     }
 
-    // Guarantee an exit path to the right
     for (int x = spawn_x; x < spawn_x + 10 && x < maze->w; x++) {
         maze->grid[spawn_y][x] = PATH;
     }
 
-    // Player spawns in center of safe zone
     player->x = spawn_x + 0.5;
     player->y = spawn_y + 0.5;
-    player->dir = M_PI / 2.0;  // facing right toward open corridor
+    player->dir = M_PI / 2.0;
+
+    // Increment level after successful generation
+    current_level++;
 }
 
 void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
@@ -329,7 +315,6 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
     int end_x_view = center_cell_x + half_view;
     int end_y_view = center_cell_y + half_view;
 
-    // Draw revealed walls
     SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
     for (int y = start_y; y < end_y_view; y++) {
         for (int x = start_x; x < end_x_view; x++) {
@@ -346,7 +331,6 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
         }
     }
 
-    // Draw MAP PIECES (bright blue glowing diamonds) - only if still present
     for (int y = start_y; y < end_y_view; y++) {
         for (int x = start_x; x < end_x_view; x++) {
             if (x >= 0 && x < maze->w && y >= 0 && y < maze->h && 
@@ -365,7 +349,6 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
         }
     }
 
-    // Draw visible exit (glowing green)
     for (int y = start_y; y < end_y_view; y++) {
         for (int x = start_x; x < end_x_view; x++) {
             if (x >= 0 && x < maze->w && y >= 0 && y < maze->h && 
@@ -384,7 +367,6 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
         }
     }
 
-    // Player dot and direction
     int px = map_x + map_size / 2;
     int py = map_y + map_size / 2;
 
@@ -402,7 +384,7 @@ void draw_minimap(SDL_Renderer *ren, Maze *maze, Player *player, int map_size) {
 }
 
 void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_map) {
-    // Reveal cells via line-of-sight
+    // First pass: reveal fog-of-war using line-of-sight rays (unchanged)
     for (int x = 0; x < SCREEN_W; x++) {
         double cameraX = 2.0 * x / SCREEN_W - 1.0;
         double rayDirX = player->dir_x + player->plane_x * cameraX;
@@ -411,11 +393,12 @@ void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_ma
         int mapX = (int)player->x;
         int mapY = (int)player->y;
 
-        double deltaDistX = fabs(1.0 / rayDirX);
-        double deltaDistY = fabs(1.0 / rayDirY);
+        double deltaDistX = (rayDirX == 0) ? 1e30 : fabs(1.0 / rayDirX);
+        double deltaDistY = (rayDirY == 0) ? 1e30 : fabs(1.0 / rayDirY);
 
         int stepX = (rayDirX < 0) ? -1 : 1;
         int stepY = (rayDirY < 0) ? -1 : 1;
+
         double sideDistX = (rayDirX < 0) ? (player->x - mapX) * deltaDistX : (mapX + 1.0 - player->x) * deltaDistX;
         double sideDistY = (rayDirY < 0) ? (player->y - mapY) * deltaDistY : (mapY + 1.0 - player->y) * deltaDistY;
 
@@ -428,28 +411,38 @@ void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_ma
                 sideDistY += deltaDistY;
                 mapY += stepY;
             }
+
             if (mapX < 0 || mapX >= maze->w || mapY < 0 || mapY >= maze->h ||
-                maze->grid[mapY][mapX] == WALL || maze->grid[mapY][mapX] == EXIT_TILE || 
+                maze->grid[mapY][mapX] == WALL || maze->grid[mapY][mapX] == EXIT_TILE ||
                 maze->grid[mapY][mapX] == MAP_PIECE) {
                 hit = 1;
             }
+
             if (mapX >= 0 && mapX < maze->w && mapY >= 0 && mapY < maze->h) {
                 maze->visited[mapY][mapX] = 1;
             }
         }
     }
 
+    // ────────────────────────────────────────────────
+    // Rendering pass
+    // ────────────────────────────────────────────────
+
+    // Clear to black as ultimate fallback
     SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
     SDL_RenderClear(ren);
 
+    // Full ceiling (slightly more than half to avoid seam)
     SDL_SetRenderDrawColor(ren, 60, 60, 100, 255);
-    SDL_Rect ceiling = {0, 0, SCREEN_W, SCREEN_H / 2};
-    SDL_RenderFillRect(ren, &ceiling);
+    SDL_Rect ceiling_rect = {0, 0, SCREEN_W, SCREEN_H / 2 + 2};
+    SDL_RenderFillRect(ren, &ceiling_rect);
 
+    // Full floor (slightly more than half)
     SDL_SetRenderDrawColor(ren, 40, 40, 60, 255);
-    SDL_Rect floor = {0, SCREEN_H / 2, SCREEN_W, SCREEN_H / 2};
-    SDL_RenderFillRect(ren, &floor);
+    SDL_Rect floor_rect = {0, SCREEN_H / 2 - 1, SCREEN_W, SCREEN_H / 2 + 2};
+    SDL_RenderFillRect(ren, &floor_rect);
 
+    // Draw vertical wall strips
     for (int x = 0; x < SCREEN_W; x++) {
         double cameraX = 2.0 * x / SCREEN_W - 1.0;
         double rayDirX = player->dir_x + player->plane_x * cameraX;
@@ -458,16 +451,18 @@ void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_ma
         int mapX = (int)player->x;
         int mapY = (int)player->y;
 
-        double deltaDistX = fabs(1.0 / rayDirX);
-        double deltaDistY = fabs(1.0 / rayDirY);
+        double deltaDistX = (rayDirX == 0) ? 1e30 : fabs(1.0 / rayDirX);
+        double deltaDistY = (rayDirY == 0) ? 1e30 : fabs(1.0 / rayDirY);
 
         int stepX = (rayDirX < 0) ? -1 : 1;
         int stepY = (rayDirY < 0) ? -1 : 1;
+
         double sideDistX = (rayDirX < 0) ? (player->x - mapX) * deltaDistX : (mapX + 1.0 - player->x) * deltaDistX;
         double sideDistY = (rayDirY < 0) ? (player->y - mapY) * deltaDistY : (mapY + 1.0 - player->y) * deltaDistY;
 
         int side = 0;
         int hit = 0;
+
         while (!hit) {
             if (sideDistX < sideDistY) {
                 sideDistX += deltaDistX;
@@ -478,35 +473,85 @@ void raycast_and_draw(SDL_Renderer *ren, Maze *maze, Player *player, int show_ma
                 mapY += stepY;
                 side = 1;
             }
+
             if (mapX < 0 || mapX >= maze->w || mapY < 0 || mapY >= maze->h ||
                 maze->grid[mapY][mapX] == WALL || maze->grid[mapY][mapX] == EXIT_TILE ||
-                maze->grid[mapY][mapX] == MAP_PIECE)
+                maze->grid[mapY][mapX] == MAP_PIECE) {
                 hit = 1;
+            }
         }
 
-        double perpWallDist = (side == 0)
-            ? (mapX - player->x + (1 - stepX)/2.0) / rayDirX
-            : (mapY - player->y + (1 - stepY)/2.0) / rayDirY;
+        // Calculate distance to wall
+        double perpWallDist;
+        if (side == 0) {
+            perpWallDist = (mapX - player->x + (1 - stepX) / 2.0) / rayDirX;
+        } else {
+            perpWallDist = (mapY - player->y + (1 - stepY) / 2.0) / rayDirY;
+        }
+
         if (perpWallDist < 0.1) perpWallDist = 0.1;
 
+        // Wall height on screen
         int lineHeight = (int)(SCREEN_H / perpWallDist);
-        int drawStart = SCREEN_H / 2 - lineHeight / 2;
-        if (drawStart < 0) drawStart = 0;
-        int drawEnd = SCREEN_H / 2 + lineHeight / 2;
-        if (drawEnd >= SCREEN_H) drawEnd = SCREEN_H - 1;
 
+        // Where to start/end drawing the line
+        int drawStart = -lineHeight / 2 + SCREEN_H / 2;
+        int drawEnd   =  lineHeight / 2 + SCREEN_H / 2;
+
+        // Clamp to screen bounds (this fixes bottom & top gaps)
+        if (drawStart < 0)          drawStart = 0;
+        if (drawEnd   > SCREEN_H)   drawEnd   = SCREEN_H;
+
+        // Extra safety: very distant/small walls still fill vertically
+        if (lineHeight < 4) {
+            drawStart = 0;
+            drawEnd   = SCREEN_H;
+        }
+
+        // Choose color
         if (maze->grid[mapY][mapX] == EXIT_TILE) {
             SDL_SetRenderDrawColor(ren, 0, 255, 100, 255);
         } else if (maze->grid[mapY][mapX] == MAP_PIECE) {
             SDL_SetRenderDrawColor(ren, 100, 150, 255, 255);
         } else {
-            Uint8 brightness = side ? 140 : 220;
+            Uint8 brightness = (side == 1) ? 140 : 220;
             SDL_SetRenderDrawColor(ren, brightness, brightness, brightness, 255);
         }
+
+        // Draw the vertical strip
         SDL_RenderDrawLine(ren, x, drawStart, x, drawEnd);
     }
 
-    if (show_map) draw_minimap(ren, maze, player, MINIMAP_SIZE);
+    // Draw minimap overlay if enabled
+    if (show_map) {
+        draw_minimap(ren, maze, player, MINIMAP_SIZE);
+    }
+}
+
+void draw_hud(SDL_Renderer *ren, TTF_Font *font) {
+    if (!font) return;
+
+    char text[32];
+    snprintf(text, sizeof(text), "Level %d", current_level);
+
+    SDL_Color color = {220, 220, 100, 255};  // light yellow
+    SDL_Surface *surf = TTF_RenderText_Blended(font, text, color);
+    if (!surf) return;
+
+    SDL_Texture *tex = SDL_CreateTextureFromSurface(ren, surf);
+    if (!tex) {
+        SDL_FreeSurface(surf);
+        return;
+    }
+
+    int w = surf->w;
+    int h = surf->h;
+    SDL_Rect dst = {20, 20, w, h};
+
+    SDL_RenderCopy(ren, tex, NULL, &dst);
+
+    SDL_DestroyTexture(tex);
+    SDL_FreeSurface(surf);
 }
 
 int main(int argc, char *argv[]) {
@@ -517,18 +562,36 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    SDL_Window *win = SDL_CreateWindow("3D Maze - Distant Map Reveals",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        SCREEN_W, SCREEN_H, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE);
-
+    if (TTF_Init() == -1) {
+        printf("TTF_Init Error: %s\n", TTF_GetError());
+        // Continue without text HUD
+    }
+    
+SDL_Window *win = SDL_CreateWindow("3D Maze - Distant Map Reveals",
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    SCREEN_W, SCREEN_H,
+    SDL_WINDOW_FULLSCREEN_DESKTOP | SDL_WINDOW_SHOWN);
     SDL_Renderer *ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-    SDL_SetRelativeMouseMode(SDL_TRUE);
+        if (!ren) {
+            printf("SDL_CreateRenderer Error: %s\n", SDL_GetError());
+            SDL_DestroyWindow(win);
+            SDL_Quit();
+            return 1;
+        }
+        SDL_ShowCursor(SDL_DISABLE);
+    // Load font (change path to a font that exists on your system)
+    TTF_Font *font = TTF_OpenFont("/usr/share/fonts/liberation/LiberationSans-Regular.ttf", 28);
+    // Alternatives:
+    // "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+    // "C:\\Windows\\Fonts\\arial.ttf"  (Windows)
+    // If font fails → HUD just won't show, game continues
 
     Maze maze;
     Room rooms[NUM_ROOMS];
 
     Player player = { .x = 3.5, .y = 3.5, .dir = M_PI / 2.0 };
 
+    // First maze + set initial level display
     regenerate_maze(&maze, rooms, &player);
 
     double fov_half_tan = tan(FOV / 2.0);
@@ -537,7 +600,7 @@ int main(int argc, char *argv[]) {
     player.plane_x = -player.dir_y * fov_half_tan;
     player.plane_y = player.dir_x * fov_half_tan;
 
-    const double moveSpeed = 3.0;  // Slightly increased for better feel
+    const double moveSpeed = 3.0;
     const double rotSpeed = 1.8;
 
     int show_map = 0;
@@ -571,7 +634,6 @@ int main(int argc, char *argv[]) {
                 player.dir += e.motion.xrel * 0.002f * rotSpeed;
         }
 
-        // Check for exit and map piece collision (use a small radius for more forgiveness)
         int px = (int)(player.x);
         int py = (int)(player.y);
         if (px >= 0 && px < maze.w && py >= 0 && py < maze.h) {
@@ -587,60 +649,63 @@ int main(int argc, char *argv[]) {
             }
         }
 
-const Uint8 *keys = SDL_GetKeyboardState(NULL);
+        const Uint8 *keys = SDL_GetKeyboardState(NULL);
 
-// Rotation with arrows (optional fallback)
-if (keys[SDL_SCANCODE_LEFT])  player.dir -= rotSpeed * 0.05;
-if (keys[SDL_SCANCODE_RIGHT]) player.dir += rotSpeed * 0.05;
+        if (keys[SDL_SCANCODE_LEFT])  player.dir -= rotSpeed * 0.05;
+        if (keys[SDL_SCANCODE_RIGHT]) player.dir += rotSpeed * 0.05;
 
-// Movement
-double dx = 0.0, dy = 0.0;
+        double dx = 0.0, dy = 0.0;
 
-if (keys[SDL_SCANCODE_W]) {
-    dx += player.dir_x * moveSpeed * 0.05;
-    dy += player.dir_y * moveSpeed * 0.05;
-}
-if (keys[SDL_SCANCODE_S]) {
-    dx -= player.dir_x * moveSpeed * 0.05;
-    dy -= player.dir_y * moveSpeed * 0.05;
-}
-if (keys[SDL_SCANCODE_D]) {
-    dx -= player.dir_y * moveSpeed * 0.05;   // left strafe
-    dy += player.dir_x * moveSpeed * 0.05;
-}
-if (keys[SDL_SCANCODE_A]) {
-    dx += player.dir_y * moveSpeed * 0.05;   // right strafe
-    dy -= player.dir_x * moveSpeed * 0.05;
-}
+        if (keys[SDL_SCANCODE_W]) {
+            dx += player.dir_x * moveSpeed * 0.05;
+            dy += player.dir_y * moveSpeed * 0.05;
+        }
+        if (keys[SDL_SCANCODE_S]) {
+            dx -= player.dir_x * moveSpeed * 0.05;
+            dy -= player.dir_y * moveSpeed * 0.05;
+        }
+        if (keys[SDL_SCANCODE_D]) {
+            dx -= player.dir_y * moveSpeed * 0.05;
+            dy += player.dir_x * moveSpeed * 0.05;
+        }
+        if (keys[SDL_SCANCODE_A]) {
+            dx += player.dir_y * moveSpeed * 0.05;
+            dy -= player.dir_x * moveSpeed * 0.05;
+        }
 
-// Apply movement with separate axis collision
-if (dx != 0.0 || dy != 0.0) {
-    double new_x = player.x + dx;
-    double new_y = player.y + dy;
+        if (dx != 0.0 || dy != 0.0) {
+            double new_x = player.x + dx;
+            double new_y = player.y + dy;
 
-    // Try X movement
-    if ((int)new_x >= 0 && (int)new_x < maze.w &&
-        maze.grid[(int)player.y][(int)new_x] != WALL) {
-        player.x = new_x;
-    }
+            if ((int)new_x >= 0 && (int)new_x < maze.w &&
+                maze.grid[(int)player.y][(int)new_x] != WALL) {
+                player.x = new_x;
+            }
 
-    // Try Y movement
-    if ((int)new_y >= 0 && (int)new_y < maze.h &&
-        maze.grid[(int)new_y][(int)player.x] != WALL) {
-        player.y = new_y;
-    }
-}
-        // Update direction vectors for raycasting
+            if ((int)new_y >= 0 && (int)new_y < maze.h &&
+                maze.grid[(int)new_y][(int)player.x] != WALL) {
+                player.y = new_y;
+            }
+        }
+
         player.dir_x = cos(player.dir);
         player.dir_y = sin(player.dir);
         player.plane_x = -player.dir_y * fov_half_tan;
         player.plane_y = player.dir_x * fov_half_tan;
 
         raycast_and_draw(ren, &maze, &player, show_map);
+
+        // Draw HUD on top of everything
+       draw_hud(ren, font);
+
         SDL_RenderPresent(ren);
     }
 
     SDL_SetRelativeMouseMode(SDL_FALSE);
+
+    if (font) TTF_CloseFont(font);
+    TTF_Quit();
+
     free_maze(&maze);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
